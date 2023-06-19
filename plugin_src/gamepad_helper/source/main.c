@@ -6,6 +6,7 @@
 #include <Patcher.h>
 #include "config.h"
 #include "pad.h"
+#include "usb_hid.h"
 
 attr_public const char* g_pluginName = "gamepad_helper";
 attr_public const char* g_pluginDesc = "(null)";
@@ -32,6 +33,9 @@ bool g_enableCustomTouchPad;
 bool g_enableCustomButton;
 int g_virationIntensity;
 
+bool g_enableDS4pad;
+bool g_enableXpad;
+struct hid_device* g_hidDevice;
 uint32_t* buttonMapping;
 
 inline int deadzone_apply(ScePadData* pData);
@@ -141,7 +145,18 @@ int custom_button(int32_t handle, ScePadData* pData) {
 
 int32_t scePadRead_hook(int32_t handle, ScePadData* pData, int32_t num) {
     int ret = 0;
-    ret = scePadReadExt(handle, pData, num);
+
+    if (g_enableDS4pad) {
+        ret = scePadReadExt(handle, pData, num);
+    }
+
+    if (g_enableXpad) {
+        for (int i = 0; i < num; i++) {
+            usb_hid_get_report(g_hidDevice, &pData[i]);
+        }
+
+        ret = num;
+    }
 
     if (ret <= 0) {
         return ret;
@@ -156,8 +171,13 @@ int32_t scePadRead_hook(int32_t handle, ScePadData* pData, int32_t num) {
 
 int32_t scePadReadState_hook(int32_t handle, ScePadData* pData) {
     int ret = 0;
-    ret = scePadReadStateExt(handle, pData);
 
+    if (g_enableDS4pad) {
+        ret = scePadReadStateExt(handle, pData);
+    }
+    if (g_enableXpad) {
+        usb_hid_get_report(g_hidDevice, pData);
+    }
     if (ret) {
         return ret;
     }
@@ -241,11 +261,17 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
 
     g_enableCustomTouchPad = false;
     g_enableCustomButton = false;
+    g_enableXpad = true;
+    g_enableDS4pad = false;
     g_virationIntensity = PAD_VIRATION_INTENSITY_STRONG;
 
     buttonMapping = (uint32_t*)malloc(BUTTON_MAPPING_MAX * sizeof(uint32_t));
 
     memset(buttonMapping, 0, BUTTON_MAPPING_MAX * sizeof(uint32_t));
+
+    g_hidDevice = (struct hid_device*)malloc(sizeof(struct hid_device));
+
+    memset(g_hidDevice, 0, sizeof(struct hid_device));
 
     buttonMapping[TOUCH_L1] = SCE_PAD_BUTTON_TOUCH_PAD;
     buttonMapping[TOUCH_R1] = SCE_PAD_BUTTON_TOUCH_PAD;
@@ -277,6 +303,10 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
     } else {
         final_printf("failed to initialise\n");
         return -1;
+    }
+
+    if (g_enableXpad) {
+        usb_hid_init(g_hidDevice);
     }
 
     if (!file_exists(PLUGIN_CONFIG_PATH)) {
@@ -316,12 +346,12 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
     }
 
     // check config value
-    if (g_deadZoneLeft > 0xFF && g_deadZoneLeft < 0) {
+    if (g_deadZoneLeft > 0xFF || g_deadZoneLeft < 0) {
         final_printf("deadZoneLeft config error, restore default value");
         g_deadZoneLeft = 0xd;
     }
 
-    if (g_deadZoneRight > 0xFF && g_deadZoneRight < 0) {
+    if (g_deadZoneRight > 0xFF || g_deadZoneRight < 0) {
         final_printf("deadZoneRight config error, restore default value");
         g_deadZoneRight = 0xd;
     }
@@ -329,6 +359,8 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
     if (g_virationIntensity != PAD_VIRATION_INTENSITY_STRONG) {
         HOOK32(scePadSetVibration);
     }
+
+    final_printf("done\n");
 
     return 0;
 }
