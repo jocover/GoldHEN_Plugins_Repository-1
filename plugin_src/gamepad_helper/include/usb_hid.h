@@ -8,6 +8,34 @@
 #define LIBUSB_TRANSFER_TYPE_MASK 0x03
 #define LIBUSB_ENDPOINT_DIR_MASK 0x80
 
+enum libusb_request_recipient {
+    /** Device */
+    LIBUSB_RECIPIENT_DEVICE = 0x00,
+
+    /** Interface */
+    LIBUSB_RECIPIENT_INTERFACE = 0x01,
+
+    /** Endpoint */
+    LIBUSB_RECIPIENT_ENDPOINT = 0x02,
+
+    /** Other */
+    LIBUSB_RECIPIENT_OTHER = 0x03,
+};
+
+enum libusb_request_type {
+    /** Standard */
+    LIBUSB_REQUEST_TYPE_STANDARD = (0x00 << 5),
+
+    /** Class */
+    LIBUSB_REQUEST_TYPE_CLASS = (0x01 << 5),
+
+    /** Vendor */
+    LIBUSB_REQUEST_TYPE_VENDOR = (0x02 << 5),
+
+    /** Reserved */
+    LIBUSB_REQUEST_TYPE_RESERVED = (0x03 << 5)
+};
+
 enum libusb_endpoint_direction {
     /** Out: host-to-device */
     LIBUSB_ENDPOINT_OUT = 0x00,
@@ -136,7 +164,7 @@ struct libusb_transfer {
     struct libusb_iso_packet_descriptor iso_packet_desc[0];
 };
 
-#define XPAD_PKT_LEN 64
+#define USB_PACKET_LENGTH 64
 
 /* The Guitar Hero Live (GHL) Xbox One dongles require a poke
  * every 8 seconds.
@@ -231,11 +259,17 @@ struct hid_device {
     struct input_report* input_reports;
 
     int is_driver_detached;
-    u16 idVendor;
-    u16 idProduct;
-    u8 xtype;
-    u8 mapping;
-    u8 quirks;
+    uint8_t* last_state;
+    uint8_t* state_buf;
+    int rumble_state;
+    int64_t rumble_time;
+
+    uint8_t odata_serial;
+    uint16_t idVendor;
+    uint16_t idProduct;
+    uint8_t xtype;
+    uint8_t mapping;
+    uint8_t quirks;
 };
 
 static struct xpad_device xpad_device_list[] = {
@@ -492,7 +526,7 @@ static struct xpad_device xpad_device_list[] = {
 
 int usb_hid_init(struct hid_device* device);
 int usb_hid_get_report(struct hid_device* device, ScePadData* pData);
-int usb_hid_write(struct hid_device* device, uint8_t* data, size_t length);
+int usb_hid_write(struct hid_device* device, const uint8_t* data, size_t length);
 int usb_hid_read(struct hid_device* device, uint8_t* data, size_t length);
-
+int usb_hid_send_rumble(struct hid_device* device, const ScePadVibrationParam* pParam);
 #endif

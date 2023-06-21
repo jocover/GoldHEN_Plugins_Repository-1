@@ -31,10 +31,10 @@ int g_deadZoneRight;
 
 bool g_enableCustomTouchPad;
 bool g_enableCustomButton;
+bool g_virtualTouchPad;
 int g_virationIntensity;
 
-bool g_enableDS4pad;
-bool g_enableXpad;
+bool g_enableUSBHid;
 struct hid_device* g_hidDevice;
 uint32_t* buttonMapping;
 
@@ -53,6 +53,9 @@ int scePadSetVibration_hook(int32_t handle, const ScePadVibrationParam* pParam) 
 
     ScePadVibrationParam Param;
 
+    Param.largeMotor = pParam->largeMotor;
+    Param.smallMotor = pParam->smallMotor;
+
     if (g_virationIntensity == PAD_VIRATION_INTENSITY_MEDIUM) {
         Param.largeMotor = pParam->largeMotor * 0.6;
         Param.smallMotor = pParam->smallMotor * 0.6;
@@ -64,7 +67,11 @@ int scePadSetVibration_hook(int32_t handle, const ScePadVibrationParam* pParam) 
     }
 
     int ret = 0;
-    ret = HOOK_CONTINUE(scePadSetVibration, int (*)(int32_t, const ScePadVibrationParam*), handle, &Param);
+    if (g_enableUSBHid) {
+        usb_hid_send_rumble(g_hidDevice, &Param);
+    } else {
+        ret = HOOK_CONTINUE(scePadSetVibration, int (*)(int32_t, const ScePadVibrationParam*), handle, &Param);
+    }
     return ret;
 }
 
@@ -109,6 +116,34 @@ int custom_touchpad(int32_t handle, ScePadData* pData) {
             }
         }
     }
+
+    return 0;
+}
+
+int virtual_touchpad(int32_t handle, ScePadData* pData) {
+    if (g_virtualTouchPad) {
+        pData->touchData.touchNum = 0;
+
+        if ((pData->buttons & SCE_PAD_BUTTON_OPTIONS) && (pData->buttons & SCE_PAD_BUTTON_LEFT)) {
+            pData->buttons |= SCE_PAD_BUTTON_TOUCH_PAD;
+            pData->touchData.touch[0].x = 200;
+            pData->touchData.touch[0].y = 700;
+            pData->touchData.touch[0].id = 1;
+            pData->touchData.touchNum = 1;
+            pData->buttons &= ~SCE_PAD_BUTTON_LEFT;
+            pData->buttons &= ~SCE_PAD_BUTTON_OPTIONS;
+        }
+
+        if ((pData->buttons & SCE_PAD_BUTTON_OPTIONS) && (pData->buttons & SCE_PAD_BUTTON_RIGHT)) {
+            pData->buttons |= SCE_PAD_BUTTON_TOUCH_PAD;
+            pData->touchData.touch[0].x = 1720;
+            pData->touchData.touch[0].y = 700;
+            pData->touchData.touch[0].id = 1;
+            pData->touchData.touchNum = 1;
+            pData->buttons &= ~SCE_PAD_BUTTON_RIGHT;
+            pData->buttons &= ~SCE_PAD_BUTTON_OPTIONS;
+        }
+    }
     return 0;
 }
 
@@ -146,16 +181,14 @@ int custom_button(int32_t handle, ScePadData* pData) {
 int32_t scePadRead_hook(int32_t handle, ScePadData* pData, int32_t num) {
     int ret = 0;
 
-    if (g_enableDS4pad) {
-        ret = scePadReadExt(handle, pData, num);
-    }
-
-    if (g_enableXpad) {
+    if (g_enableUSBHid) {
         for (int i = 0; i < num; i++) {
             usb_hid_get_report(g_hidDevice, &pData[i]);
         }
 
         ret = num;
+    } else {
+        ret = scePadReadExt(handle, pData, num);
     }
 
     if (ret <= 0) {
@@ -165,6 +198,7 @@ int32_t scePadRead_hook(int32_t handle, ScePadData* pData, int32_t num) {
         deadzone_apply(&pData[i]);
         custom_button(handle, &pData[i]);
         custom_touchpad(handle, &pData[i]);
+        virtual_touchpad(handle, &pData[i]);
     }
     return ret;
 }
@@ -172,11 +206,10 @@ int32_t scePadRead_hook(int32_t handle, ScePadData* pData, int32_t num) {
 int32_t scePadReadState_hook(int32_t handle, ScePadData* pData) {
     int ret = 0;
 
-    if (g_enableDS4pad) {
-        ret = scePadReadStateExt(handle, pData);
-    }
-    if (g_enableXpad) {
+    if (g_enableUSBHid) {
         usb_hid_get_report(g_hidDevice, pData);
+    } else {
+        ret = scePadReadStateExt(handle, pData);
     }
     if (ret) {
         return ret;
@@ -184,6 +217,7 @@ int32_t scePadReadState_hook(int32_t handle, ScePadData* pData) {
     deadzone_apply(pData);
     custom_button(handle, pData);
     custom_touchpad(handle, pData);
+    virtual_touchpad(handle, pData);
     return ret;
 }
 
@@ -226,6 +260,10 @@ int32_t load_config(ini_table_s* table, const char* section_name) {
     }
 
     ini_table_get_entry_as_viration_intensity(table, section_name, "VirationIntensity", &g_virationIntensity);
+
+    ini_table_get_entry_as_bool(table, section_name, "enableUSBHid", &g_enableUSBHid);
+    ini_table_get_entry_as_bool(table, section_name, "enableVirtualTouchPad", &g_virtualTouchPad);
+
     return 0;
 }
 
@@ -261,8 +299,8 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
 
     g_enableCustomTouchPad = false;
     g_enableCustomButton = false;
-    g_enableXpad = true;
-    g_enableDS4pad = false;
+    g_enableUSBHid = false;
+    g_virtualTouchPad = false;
     g_virationIntensity = PAD_VIRATION_INTENSITY_STRONG;
 
     buttonMapping = (uint32_t*)malloc(BUTTON_MAPPING_MAX * sizeof(uint32_t));
@@ -303,10 +341,6 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
     } else {
         final_printf("failed to initialise\n");
         return -1;
-    }
-
-    if (g_enableXpad) {
-        usb_hid_init(g_hidDevice);
     }
 
     if (!file_exists(PLUGIN_CONFIG_PATH)) {
@@ -356,8 +390,12 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
         g_deadZoneRight = 0xd;
     }
 
-    if (g_virationIntensity != PAD_VIRATION_INTENSITY_STRONG) {
+    if (g_virationIntensity != PAD_VIRATION_INTENSITY_STRONG || g_enableUSBHid) {
         HOOK32(scePadSetVibration);
+    }
+
+    if (g_enableUSBHid) {
+        usb_hid_init(g_hidDevice);
     }
 
     final_printf("done\n");
@@ -370,7 +408,7 @@ s32 attr_module_hidden module_stop(s64 argc, const void* args) {
     UNHOOK(scePadRead);
     UNHOOK(scePadReadState);
 
-    if (g_virationIntensity != PAD_VIRATION_INTENSITY_STRONG) {
+    if (g_virationIntensity != PAD_VIRATION_INTENSITY_STRONG || g_enableUSBHid) {
         UNHOOK(scePadSetVibration);
     }
 

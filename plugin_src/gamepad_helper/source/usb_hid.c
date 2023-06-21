@@ -7,8 +7,6 @@
 int (*sceUsbdInit)(void);
 int (*sceUsbdExit)(void);
 libusb_device_handle* (*sceUsbdOpenDeviceWithVidPid)(uint16_t vendorId, uint16_t productId);
-// int (*sceUsbdKernelDriverActive)(libusb_device_handle* deviceHandle, int interface);
-// int (*sceUsbdDetachKernelDriver)(libusb_device_handle* deviceHandle, int interface);
 int (*sceUsbdClaimInterface)(libusb_device_handle* deviceHandle, int interfaceNumber);
 
 int (*sceUsbdInterruptTransfer)(libusb_device_handle* deviceHandle, uint8_t endpoint, uint8_t* data, int length,
@@ -32,6 +30,8 @@ void (*sceUsbdFillInterruptTransfer)(struct libusb_transfer* transfer, libusb_de
 int (*sceUsbdSubmitTransfer)(struct libusb_transfer* transfer);
 int (*sceUsbdCancelTransfer)(struct libusb_transfer* transfer);
 int (*sceUsbdHandleEvents)(void);
+int (*sceUsbdControlTransfer)(libusb_device_handle* deviceHandle, uint8_t bmRequestType, uint8_t bRequest,
+                              uint16_t wValue, uint16_t wIndex, uint8_t* data, uint16_t wLength, uint32_t timeout);
 
 int xpad_probe(struct libusb_device_descriptor* desc, struct hid_device* device) {
     for (int i = 0; xpad_device_list[i].idVendor; i++) {
@@ -210,6 +210,23 @@ static int should_enumerate_interface(unsigned short vendor_id, const struct lib
     return 0;
 }
 
+static void init_xbox360(libusb_device_handle* device_handle, unsigned short idVendor, unsigned short idProduct,
+                         const struct libusb_config_descriptor* conf_desc) {
+    (void)conf_desc;
+
+    if ((idVendor == 0x05ac && idProduct == 0x055b) /* Gamesir-G3w */ ||
+        idVendor == 0x0f0d /* Hori Xbox controllers */) {
+        unsigned char data[20];
+
+        /* The HORIPAD FPS for Nintendo Switch requires this to enable input reports.
+           This VID/PID is also shared with other HORI controllers, but they all seem
+           to be fine with this as well.
+         */
+        memset(data, 0, sizeof(data));
+        sceUsbdControlTransfer(device_handle, 0xC1, 0x01, 0x100, 0x0, data, sizeof(data), 100);
+    }
+}
+
 static void init_xboxone(libusb_device_handle* device_handle, unsigned short idVendor, unsigned short idProduct,
                          const struct libusb_config_descriptor* conf_desc) {
     static const int vendor_microsoft = 0x045e;
@@ -346,7 +363,6 @@ static void* read_thread(void* param) {
     sceUsbdFillInterruptTransfer(dev->transfer, dev->handle, dev->input_endpoint, buf, length, read_callback, dev,
                                  5000 /*timeout*/);
 
-    printf("sceUsbdFillInterruptTransfer\n");
     res = sceUsbdSubmitTransfer(dev->transfer);
     if (res < 0) {
         printf("libusb_submit_transfer failed: %d . Stopping read_thread from running\n", res);
@@ -361,7 +377,6 @@ static void* read_thread(void* param) {
         res = sceUsbdHandleEvents();
         if (res < 0) {
             /* There was an error. */
-            printf("read_thread(): (%d) \n", res);
 
             /* Break out of this loop only on fatal error.*/
             if (res != 0x80240006 && res != 0x80240007 && res != 0x80240008 && res != 0x8024000A) {
@@ -401,7 +416,7 @@ static int initialize_device(struct hid_device* dev, const struct libusb_interfa
 
     /* Initialize XBox 360 controllers */
     if (is_xbox360(desc.idVendor, intf_desc)) {
-        //	init_xbox360(dev->device_handle, desc.idVendor, desc.idProduct, conf_desc);
+        init_xbox360(dev->handle, desc.idVendor, desc.idProduct, conf_desc);
     }
     //
 
@@ -453,6 +468,9 @@ static int initialize_device(struct hid_device* dev, const struct libusb_interfa
 
     calculate_device_quirks(dev, desc.idVendor, desc.idProduct);
 
+    dev->last_state = (uint8_t*)malloc(USB_PACKET_LENGTH);
+    dev->state_buf = (uint8_t*)malloc(USB_PACKET_LENGTH);
+
     pthread_create(&dev->thread, NULL, read_thread, dev);
 
     // pthread_barrier_wait(&dev->barrier);
@@ -462,7 +480,6 @@ static int initialize_device(struct hid_device* dev, const struct libusb_interfa
 int usb_hid_init(struct hid_device* device) {
     char module[256];
 
-    printf("usb_hid_init\n");
     int h = 0;
     int32_t ret = 0;
     int found = 0;
@@ -481,8 +498,6 @@ int usb_hid_init(struct hid_device* device) {
     sys_dynlib_dlsym(h, "sceUsbdInit", &sceUsbdInit);
     sys_dynlib_dlsym(h, "sceUsbdExit", &sceUsbdExit);
     sys_dynlib_dlsym(h, "sceUsbdOpenDeviceWithVidPid", &sceUsbdOpenDeviceWithVidPid);
-    //    sys_dynlib_dlsym(h, "sceUsbdKernelDriverActive", &sceUsbdKernelDriverActive);
-    //    sys_dynlib_dlsym(h, "sceUsbdDetachKernelDriver", &sceUsbdDetachKernelDriver);
     sys_dynlib_dlsym(h, "sceUsbdClaimInterface", &sceUsbdClaimInterface);
     sys_dynlib_dlsym(h, "sceUsbdInterruptTransfer", &sceUsbdInterruptTransfer);
     sys_dynlib_dlsym(h, "sceUsbdReleaseInterface", &sceUsbdReleaseInterface);
@@ -494,17 +509,17 @@ int usb_hid_init(struct hid_device* device) {
     sys_dynlib_dlsym(h, "sceUsbdGetConfigDescriptor", &sceUsbdGetConfigDescriptor);
     sys_dynlib_dlsym(h, "sceUsbdSetInterfaceAltSetting", &sceUsbdSetInterfaceAltSetting);
     sys_dynlib_dlsym(h, "sceUsbdClose", &sceUsbdClose);
-
     sys_dynlib_dlsym(h, "sceUsbdFreeConfigDescriptor", &sceUsbdFreeConfigDescriptor);
     sys_dynlib_dlsym(h, "sceUsbdAllocTransfer", &sceUsbdAllocTransfer);
     sys_dynlib_dlsym(h, "sceUsbdFillInterruptTransfer", &sceUsbdFillInterruptTransfer);
     sys_dynlib_dlsym(h, "sceUsbdSubmitTransfer", &sceUsbdSubmitTransfer);
     sys_dynlib_dlsym(h, "sceUsbdCancelTransfer", &sceUsbdCancelTransfer);
     sys_dynlib_dlsym(h, "sceUsbdHandleEvents", &sceUsbdHandleEvents);
-
+    sys_dynlib_dlsym(h, "sceUsbdControlTransfer", &sceUsbdControlTransfer);
     ret = sceUsbdInit();
     if (ret) {
         printf("sceUsbdInit failed\n");
+        return 0;
     }
 
     int count = sceUsbdGetDeviceList(&list);
@@ -550,11 +565,10 @@ int usb_hid_init(struct hid_device* device) {
     }
     sceUsbdFreeConfigDescriptor(conf_desc);
 
-    printf("input_endpoint:%02x input_ep_max_packet_size:%d\n", device->input_endpoint,
-           device->input_ep_max_packet_size);
+    // printf("input_endpoint:%02x input_ep_max_packet_size:%d\n", device->input_endpoint,
+    //      device->input_ep_max_packet_size);
     if (good_open) {
         if (device->xtype == XTYPE_XBOXONE) {
-            int32_t actual;
             uint8_t sequence = 1;
             /* Start controller */
             uint8_t xboxone_init0[] = {0x05, 0x20, 0x03, 0x01, 0x00};
@@ -564,17 +578,29 @@ int usb_hid_init(struct hid_device* device) {
 
             uint8_t security_passed_packet[] = {0x06, 0x20, 0x00, 0x02, 0x01, 0x00};
 
+            uint8_t xboxone_powera_rumble_init[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0F, 0x00,
+                                                    0x00, 0x1D, 0x1D, 0xFF, 0x00, 0xFF};
+
+            uint8_t xboxone_powera_rumble_init_end[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0F, 0x00,
+                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
             xboxone_init0[2] = sequence++;
-            sceUsbdInterruptTransfer(device->handle, device->output_endpoint, xboxone_init0, sizeof(xboxone_init0),
-                                     &actual, 5000);
+            usb_hid_write(device, xboxone_init0, sizeof(xboxone_init0));
 
             xboxone_init1[2] = sequence++;
-            sceUsbdInterruptTransfer(device->handle, device->output_endpoint, xboxone_init0, sizeof(xboxone_init1),
-                                     &actual, 5000);
+            usb_hid_write(device, xboxone_init1, sizeof(xboxone_init1));
 
             security_passed_packet[2] = sequence++;
-            sceUsbdInterruptTransfer(device->handle, device->output_endpoint, security_passed_packet,
-                                     sizeof(security_passed_packet), &actual, 5000);
+            usb_hid_write(device, security_passed_packet, sizeof(security_passed_packet));
+
+            xboxone_powera_rumble_init[2] = sequence++;
+            usb_hid_write(device, xboxone_powera_rumble_init, sizeof(xboxone_powera_rumble_init));
+
+            xboxone_powera_rumble_init_end[2] = sequence++;
+            usb_hid_write(device, xboxone_powera_rumble_init_end, sizeof(xboxone_powera_rumble_init_end));
+
+        } else if (device->xtype == XTYPE_XBOX360W) {
+            uint8_t init_packet[] = {0x08, 0x00, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            usb_hid_write(device, init_packet, sizeof(init_packet));
         }
 
         return 0;
@@ -685,10 +711,93 @@ int usb_hid_read(struct hid_device* dev, uint8_t* data, size_t length) {
     return usb_hid_read_timeout(dev, data, length, dev->blocking ? -1 : 0);
 }
 
-uint8_t last_state[XPAD_PKT_LEN];
+int usb_hid_write(struct hid_device* dev, const uint8_t* data, size_t length) {
+    int res;
+    int report_number;
+    int skipped_report_id = 0;
+
+    if (!data || (length == 0)) {
+        return -1;
+    }
+
+    report_number = data[0];
+
+    if (report_number == 0x0 || dev->skip_output_report_id) {
+        data++;
+        length--;
+        skipped_report_id = 1;
+    }
+
+    if (dev->output_endpoint <= 0 || dev->no_output_reports_on_intr_ep) {
+        /* No interrupt out endpoint. Use the Control Endpoint */
+        res = sceUsbdControlTransfer(dev->handle,
+                                     LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE | LIBUSB_ENDPOINT_OUT,
+                                     0x09 /*HID Set_Report*/, (2 /*HID output*/ << 8) | report_number, dev->interface,
+                                     (unsigned char*)data, (uint16_t)length, 1000 /*timeout millis*/);
+
+        if (res < 0) return -1;
+
+        if (skipped_report_id) length++;
+
+        return length;
+    } else {
+        /* Use the interrupt out endpoint */
+        int actual_length;
+        res = sceUsbdInterruptTransfer(dev->handle, dev->output_endpoint, (unsigned char*)data, length, &actual_length,
+                                       1000);
+
+        if (res < 0) return -1;
+
+        if (skipped_report_id) actual_length++;
+
+        return actual_length;
+    }
+}
+
+void xpad360_process_packet(uint8_t* data, ScePadData* pData) {
+    pData->buttons |= (data[2] & 0x01) ? SCE_PAD_BUTTON_UP : 0;
+    pData->buttons |= (data[2] & 0x02) ? SCE_PAD_BUTTON_DOWN : 0;
+    pData->buttons |= (data[2] & 0x04) ? SCE_PAD_BUTTON_LEFT : 0;
+    pData->buttons |= (data[2] & 0x08) ? SCE_PAD_BUTTON_RIGHT : 0;
+    pData->buttons |= (data[2] & 0x10) ? SCE_PAD_BUTTON_OPTIONS : 0;
+    pData->buttons |= (data[2] & 0x20) ? SCE_PAD_BUTTON_TOUCH_PAD : 0;
+    pData->buttons |= (data[2] & 0x40) ? SCE_PAD_BUTTON_L3 : 0;
+    pData->buttons |= (data[2] & 0x80) ? SCE_PAD_BUTTON_R3 : 0;
+
+    pData->buttons |= (data[3] & 0x01) ? SCE_PAD_BUTTON_R1 : 0;
+    pData->buttons |= (data[3] & 0x02) ? SCE_PAD_BUTTON_L1 : 0;
+    pData->buttons |= (data[3] & 0x08) ? SCE_PAD_BUTTON_CROSS : 0;
+    pData->buttons |= (data[3] & 0x10) ? SCE_PAD_BUTTON_CIRCLE : 0;
+    pData->buttons |= (data[3] & 0x20) ? SCE_PAD_BUTTON_SQUARE : 0;
+    pData->buttons |= (data[3] & 0x40) ? SCE_PAD_BUTTON_TRIANGLE : 0;
+
+    int16_t axis = data[4];
+    if (axis > 64) {
+        pData->buttons |= SCE_PAD_BUTTON_L2;
+    }
+    pData->analogButtons.l2 = axis;
+
+    axis = data[5];
+    if (axis > 64) {
+        pData->buttons |= SCE_PAD_BUTTON_R2;
+    }
+    pData->analogButtons.r2 = axis;
+
+    axis = *(int16_t*)(&data[6]);
+    pData->leftStick.x = (axis / 256) + 0x80;
+
+    axis = (*(int16_t*)(&data[8]));
+    pData->leftStick.y = (~axis / 256) + 0x80;
+
+    axis = (*(int16_t*)(&data[10]));
+    pData->rightStick.x = (axis / 256) + 0x80;
+
+    axis = (*(int16_t*)(&data[12]));
+    pData->rightStick.y = (~axis / 256) + 0x80;
+}
 
 void xpadone_process_packet(uint8_t* data, ScePadData* pData) {
-    //   int size = ((4 + data[3]) < XPAD_PKT_LEN) ? (4 + data[3]) : XPAD_PKT_LEN;
+    // int size = ((4 + data[3]) < XPAD_PKT_LEN) ? (4 + data[3]) : XPAD_PKT_LEN;
 
     pData->buttons |= (data[4] & 0x04) ? SCE_PAD_BUTTON_OPTIONS : 0;
     pData->buttons |= (data[4] & 0x08) ? SCE_PAD_BUTTON_TOUCH_PAD : 0;
@@ -711,14 +820,14 @@ void xpadone_process_packet(uint8_t* data, ScePadData* pData) {
     // 0~1024
     int16_t axis = *(int16_t*)(&data[6]);
 
-    if (axis > 32) {
+    if (axis > 64) {
         pData->buttons |= SCE_PAD_BUTTON_L2;
     }
     pData->analogButtons.l2 = axis / 4;
 
     axis = *(int16_t*)(&data[8]);
 
-    if (axis > 32) {
+    if (axis > 64) {
         pData->buttons |= SCE_PAD_BUTTON_R2;
     }
 
@@ -726,20 +835,21 @@ void xpadone_process_packet(uint8_t* data, ScePadData* pData) {
 
     // x -32768 ~ 32767
     axis = (*(int16_t*)(&data[10]));
-    pData->leftStick.x = abs((axis / 256) + 0x80);
+    pData->leftStick.x = (axis / 256) + 0x80;
 
     // y 32767 ~ -32768
     // printf("axis x:%d", axis);
     axis = (*(int16_t*)(&data[12]));
-    pData->leftStick.y = abs((axis / 256) - 0x7F);
+
+    pData->leftStick.y = (~axis / 256) + 0x80;
 
     // printf("axis y:%d\n", axis);
 
     axis = (*(int16_t*)(&data[14]));
-    pData->rightStick.x = (axis / 256) - 0x80;
+    pData->rightStick.x = (axis / 256) + 0x80;
 
     axis = (*(int16_t*)(&data[16]));
-    pData->rightStick.y = abs((axis / 256) - 0x7F);
+    pData->rightStick.y = (~axis / 256) + 0x80;
 
     // pData->connected = 1;
     // pData->connectedCount = 1;
@@ -750,43 +860,126 @@ void xpadone_process_packet(uint8_t* data, ScePadData* pData) {
 int usb_hid_get_report(struct hid_device* dev, ScePadData* pData) {
     if (!dev->handle) return -1;
 
-    //    pthread_mutex_lock(&dev->mutex);
-
-    //    pthread_mutex_unlock(&dev->mutex);
-
-    // int32_t actual;
-
-    // counter++;
-
-    /*
-    if (counter > 3) {
-        printf("data:");
-        for (int i = 0; i < XPAD_PKT_LEN; i++) {
-            printf("%02x", data[i]);
-        }
-        printf("\n");
-
-        //    printf("first:%02x bt0:%02x\n", data[0], data[1]);
-        counter = 0;
-    }
-*/
     pData->buttons = 0;
     pData->connected = 1;
     pData->connectedCount = 1;
     pData->timestamp = sceKernelGetProcessTime();
 
+    memset(dev->state_buf, 0, USB_PACKET_LENGTH);
+    int32_t actual = usb_hid_read(dev, dev->state_buf, USB_PACKET_LENGTH);
     if (dev->xtype == XTYPE_XBOXONE) {
-        uint8_t data[XPAD_PKT_LEN];
-        data[0] = 0;
-        int32_t actual = usb_hid_read(dev, data, XPAD_PKT_LEN);
-        // printf("actual:%d\n", actual);
-        if (actual && data[0] == 0x20) {
-            // printf("have data\n");
-            memcpy(last_state, data, XPAD_PKT_LEN);
-            xpadone_process_packet(data, pData);
+        if (actual && dev->state_buf[0] == 0x20) {
+            memcpy(dev->last_state, dev->state_buf, USB_PACKET_LENGTH);
+            xpadone_process_packet(dev->state_buf, pData);
         } else {
-            xpadone_process_packet(last_state, pData);
+            xpadone_process_packet(dev->last_state, pData);
+        }
+    } else if (dev->xtype == XTYPE_XBOX360) {
+        if (actual && dev->state_buf[0] == 0x00) {
+            memcpy(dev->last_state, dev->state_buf, USB_PACKET_LENGTH);
+            xpad360_process_packet(dev->state_buf, pData);
+        } else {
+            xpad360_process_packet(dev->last_state, pData);
+        }
+    } else if (dev->xtype == XTYPE_XBOX360W) {
+        if (actual == 29 && dev->state_buf[0] == 0x00 && (dev->state_buf[1] & 0x01) == 0x01) {
+            xpad360_process_packet(dev->state_buf, pData);
+        } else {
+            xpad360_process_packet(dev->last_state, pData);
         }
     }
+    return 0;
+}
+
+typedef enum {
+    XBOX_ONE_RUMBLE_STATE_IDLE,
+    XBOX_ONE_RUMBLE_STATE_QUEUED,
+    XBOX_ONE_RUMBLE_STATE_BUSY
+} SDL_XboxOneRumbleState;
+
+int usb_hid_send_rumble(struct hid_device* device, const ScePadVibrationParam* pParam) {
+    uint8_t rumble_packet[13];
+    int32_t len = 0;
+
+    if (pParam->largeMotor == 0 && pParam->smallMotor == 0) {
+        return 0;
+    }
+
+    if (device->rumble_state == XBOX_ONE_RUMBLE_STATE_QUEUED) {
+        if (device->rumble_time) {
+            device->rumble_state = XBOX_ONE_RUMBLE_STATE_BUSY;
+        }
+    }
+
+    if (device->rumble_state == XBOX_ONE_RUMBLE_STATE_BUSY) {
+        const int RUMBLE_BUSY_TIME = 3000000;
+        if (sceKernelGetProcessTime() >= (device->rumble_time + RUMBLE_BUSY_TIME)) {
+            device->rumble_time = 0;
+            device->rumble_state = XBOX_ONE_RUMBLE_STATE_IDLE;
+        }
+    }
+
+    if (device->rumble_state != XBOX_ONE_RUMBLE_STATE_IDLE) {
+        return 0;
+    }
+
+    switch (device->xtype) {
+        case XTYPE_XBOX360:
+            rumble_packet[0] = 0x00;
+            rumble_packet[1] = 0x08;
+            rumble_packet[2] = 0x00;
+            rumble_packet[3] = pParam->largeMotor; /* left actuator? */
+            rumble_packet[4] = pParam->smallMotor; /* right actuator? */
+            rumble_packet[5] = 0x00;
+            rumble_packet[6] = 0x00;
+            rumble_packet[7] = 0x00;
+            len = 8;
+
+            break;
+
+        case XTYPE_XBOX360W:
+            rumble_packet[0] = 0x00;
+            rumble_packet[1] = 0x01;
+            rumble_packet[2] = 0x0F;
+            rumble_packet[3] = 0xC0;
+            rumble_packet[4] = 0x00;
+            rumble_packet[5] = pParam->largeMotor;
+            rumble_packet[6] = pParam->smallMotor;
+            rumble_packet[7] = 0x00;
+            rumble_packet[8] = 0x00;
+            rumble_packet[9] = 0x00;
+            rumble_packet[10] = 0x00;
+            rumble_packet[11] = 0x00;
+            len = 12;
+
+            // https://github.com/quantus/xbox-one-controller-protocol
+        case XTYPE_XBOXONE:
+            rumble_packet[0] = 0x09; /* activate rumble */
+            rumble_packet[1] = 0x00;
+            rumble_packet[2] = device->odata_serial++;
+            rumble_packet[3] = 0x09;
+            rumble_packet[4] = 0x00;
+            rumble_packet[5] = 0x0F;
+            rumble_packet[6] = 0x00;                     /* left trigger */
+            rumble_packet[7] = 0x00;                     /* right trigger */
+            rumble_packet[8] = pParam->largeMotor / 2.6; /* left actuator */
+            rumble_packet[9] = pParam->smallMotor / 2.6; /* right actuator */
+            rumble_packet[10] = 0x30;                    /* on period */
+            rumble_packet[11] = 0x00;                    /* off period */
+            rumble_packet[12] = 0x01;                    /* repeat count */
+            len = 13;
+
+        default:
+            break;
+    }
+
+    device->rumble_time = sceKernelGetProcessTime();
+
+    printf("send rumble :%ld largeMotor:%d smallMotor:%d\n", device->rumble_time, pParam->largeMotor,
+           pParam->smallMotor);
+    usb_hid_write(device, rumble_packet, len);
+
+    device->rumble_state = XBOX_ONE_RUMBLE_STATE_QUEUED;
+
     return 0;
 }
