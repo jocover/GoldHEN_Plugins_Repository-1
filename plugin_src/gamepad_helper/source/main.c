@@ -395,7 +395,10 @@ s32 attr_module_hidden module_start(s64 argc, const void* args) {
     }
 
     if (g_enableUSBHid) {
-        usb_hid_init(g_hidDevice);
+        if (usb_hid_init(g_hidDevice)) {
+            final_printf("usb hid init faile");
+            g_enableUSBHid = false;
+        }
     }
 
     final_printf("done\n");

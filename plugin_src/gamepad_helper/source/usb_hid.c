@@ -519,7 +519,7 @@ int usb_hid_init(struct hid_device* device) {
     ret = sceUsbdInit();
     if (ret) {
         printf("sceUsbdInit failed\n");
-        return 0;
+        return -1;
     }
 
     int count = sceUsbdGetDeviceList(&list);
@@ -569,34 +569,69 @@ int usb_hid_init(struct hid_device* device) {
     //      device->input_ep_max_packet_size);
     if (good_open) {
         if (device->xtype == XTYPE_XBOXONE) {
-            uint8_t sequence = 1;
-            /* Start controller */
-            uint8_t xboxone_init0[] = {0x05, 0x20, 0x03, 0x01, 0x00};
+            uint8_t init_seq = 0;
+            uint8_t odata[USB_PACKET_LENGTH];
 
-            /* Enable LED */
-            uint8_t xboxone_init1[] = {0x0A, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14};
+            const uint8_t xboxone_s_init[] = {GIP_CMD_POWER, GIP_OPT_INTERNAL, GIP_SEQ0, 0x0f, 0x06};
+            const uint8_t xboxone_power_on[] = {GIP_CMD_POWER, GIP_OPT_INTERNAL, GIP_SEQ0, GIP_PL_LEN(1), GIP_PWR_ON};
+            const uint8_t extra_input_packet_init[] = {0x4d, 0x10, 0x01, 0x02, 0x07, 0x00};
+            const uint8_t xboxone_hori_ack_id[] = {GIP_CMD_ACK,
+                                                   GIP_OPT_INTERNAL,
+                                                   GIP_SEQ0,
+                                                   GIP_PL_LEN(9),
+                                                   0x00,
+                                                   GIP_CMD_IDENTIFY,
+                                                   GIP_OPT_INTERNAL,
+                                                   0x3a,
+                                                   0x00,
+                                                   0x00,
+                                                   0x00,
+                                                   0x80,
+                                                   0x00};
+            const uint8_t xboxone_pdp_led_on[] = {GIP_CMD_LED, GIP_OPT_INTERNAL, GIP_SEQ0, GIP_PL_LEN(3),
+                                                  0x00,        GIP_LED_ON,       0x14};
+            const uint8_t xboxone_pdp_auth[] = {
+                GIP_CMD_AUTHENTICATE, GIP_OPT_INTERNAL, GIP_SEQ0, GIP_PL_LEN(2), 0x01, 0x00};
+            const uint8_t xboxone_rumblebegin_init[] = {GIP_CMD_RUMBLE, 0x00, GIP_SEQ0, GIP_PL_LEN(9), 0x00,
+                                                        GIP_MOTOR_ALL,  0x00, 0x00,     0x1D,          0x1D,
+                                                        0xFF,           0x00, 0x00};
+            const uint8_t xboxone_rumbleend_init[] = {GIP_CMD_RUMBLE, 0x00, GIP_SEQ0, GIP_PL_LEN(9), 0x00,
+                                                      GIP_MOTOR_ALL,  0x00, 0x00,     0x00,          0x00,
+                                                      0x00,           0x00, 0x00};
 
-            uint8_t security_passed_packet[] = {0x06, 0x20, 0x00, 0x02, 0x01, 0x00};
+            struct xboxone_init_packet xboxone_init_packets[] = {
+                XBOXONE_INIT_PKT(0x0e6f, 0x0165, xboxone_hori_ack_id),
+                XBOXONE_INIT_PKT(0x0f0d, 0x0067, xboxone_hori_ack_id),
+                XBOXONE_INIT_PKT(0x1430, 0x079b, xboxone_hori_ack_id),
+                XBOXONE_INIT_PKT(0x0000, 0x0000, xboxone_power_on),
+                XBOXONE_INIT_PKT(0x045e, 0x02ea, xboxone_s_init),
+                XBOXONE_INIT_PKT(0x045e, 0x0b00, xboxone_s_init),
+                XBOXONE_INIT_PKT(0x045e, 0x0b00, extra_input_packet_init),
+                XBOXONE_INIT_PKT(0x0e6f, 0x0000, xboxone_pdp_led_on),
+                XBOXONE_INIT_PKT(0x1430, 0x079b, xboxone_pdp_led_on),
+                XBOXONE_INIT_PKT(0x0e6f, 0x0000, xboxone_pdp_auth),
+                XBOXONE_INIT_PKT(0x1430, 0x079b, xboxone_pdp_auth),
+                XBOXONE_INIT_PKT(0x24c6, 0x541a, xboxone_rumblebegin_init),
+                XBOXONE_INIT_PKT(0x24c6, 0x542a, xboxone_rumblebegin_init),
+                XBOXONE_INIT_PKT(0x24c6, 0x543a, xboxone_rumblebegin_init),
+                XBOXONE_INIT_PKT(0x24c6, 0x541a, xboxone_rumbleend_init),
+                XBOXONE_INIT_PKT(0x24c6, 0x542a, xboxone_rumbleend_init),
+                XBOXONE_INIT_PKT(0x24c6, 0x543a, xboxone_rumbleend_init),
 
-            uint8_t xboxone_powera_rumble_init[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0F, 0x00,
-                                                    0x00, 0x1D, 0x1D, 0xFF, 0x00, 0xFF};
+            };
 
-            uint8_t xboxone_powera_rumble_init_end[] = {0x09, 0x00, 0x00, 0x09, 0x00, 0x0F, 0x00,
-                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-            xboxone_init0[2] = sequence++;
-            usb_hid_write(device, xboxone_init0, sizeof(xboxone_init0));
+            while (init_seq < ARRAY_SIZE(xboxone_init_packets)) {
+                const struct xboxone_init_packet* init_packet = &xboxone_init_packets[init_seq++];
 
-            xboxone_init1[2] = sequence++;
-            usb_hid_write(device, xboxone_init1, sizeof(xboxone_init1));
+                if (init_packet->idVendor != 0 && init_packet->idVendor != device->idVendor) continue;
+                if (init_packet->idProduct != 0 && init_packet->idProduct != device->idProduct) continue;
 
-            security_passed_packet[2] = sequence++;
-            usb_hid_write(device, security_passed_packet, sizeof(security_passed_packet));
+                memcpy(odata, init_packet->data, init_packet->len);
 
-            xboxone_powera_rumble_init[2] = sequence++;
-            usb_hid_write(device, xboxone_powera_rumble_init, sizeof(xboxone_powera_rumble_init));
+                odata[2] = device->odata_serial++;
 
-            xboxone_powera_rumble_init_end[2] = sequence++;
-            usb_hid_write(device, xboxone_powera_rumble_init_end, sizeof(xboxone_powera_rumble_init_end));
+                usb_hid_write(device, odata, init_packet->len);
+            }
 
         } else if (device->xtype == XTYPE_XBOX360W) {
             uint8_t init_packet[] = {0x08, 0x00, 0x0F, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -891,95 +926,85 @@ int usb_hid_get_report(struct hid_device* dev, ScePadData* pData) {
     return 0;
 }
 
-typedef enum {
-    XBOX_ONE_RUMBLE_STATE_IDLE,
-    XBOX_ONE_RUMBLE_STATE_QUEUED,
-    XBOX_ONE_RUMBLE_STATE_BUSY
-} SDL_XboxOneRumbleState;
-
 int usb_hid_send_rumble(struct hid_device* device, const ScePadVibrationParam* pParam) {
     uint8_t rumble_packet[13];
     int32_t len = 0;
 
     if (pParam->largeMotor == 0 && pParam->smallMotor == 0) {
-        return 0;
-    }
+        switch (device->xtype) {
+            case XTYPE_XBOXONE:
+                rumble_packet[0] = 0x09; /* activate rumble */
+                rumble_packet[1] = 0x00;
+                rumble_packet[2] = device->odata_serial++;
+                rumble_packet[3] = 0x09;
+                rumble_packet[4] = 0x00;
+                rumble_packet[5] = 0x0F;
+                rumble_packet[6] = 0x00;  /* left trigger */
+                rumble_packet[7] = 0x00;  /* right trigger */
+                rumble_packet[8] = 0x00;  /* left actuator */
+                rumble_packet[9] = 0x00;  /* right actuator */
+                rumble_packet[10] = 0x00; /* on period */
+                rumble_packet[11] = 0x00; /* off period */
+                rumble_packet[12] = 0x00; /* repeat count */
+                len = 13;
 
-    if (device->rumble_state == XBOX_ONE_RUMBLE_STATE_QUEUED) {
-        if (device->rumble_time) {
-            device->rumble_state = XBOX_ONE_RUMBLE_STATE_BUSY;
+            default:
+                break;
+        }
+
+    } else {
+        switch (device->xtype) {
+            case XTYPE_XBOX360:
+                rumble_packet[0] = 0x00;
+                rumble_packet[1] = 0x08;
+                rumble_packet[2] = 0x00;
+                rumble_packet[3] = pParam->largeMotor; /* left actuator? */
+                rumble_packet[4] = pParam->smallMotor; /* right actuator? */
+                rumble_packet[5] = 0x00;
+                rumble_packet[6] = 0x00;
+                rumble_packet[7] = 0x00;
+                len = 8;
+
+                break;
+
+            case XTYPE_XBOX360W:
+                rumble_packet[0] = 0x00;
+                rumble_packet[1] = 0x01;
+                rumble_packet[2] = 0x0F;
+                rumble_packet[3] = 0xC0;
+                rumble_packet[4] = 0x00;
+                rumble_packet[5] = pParam->largeMotor;
+                rumble_packet[6] = pParam->smallMotor;
+                rumble_packet[7] = 0x00;
+                rumble_packet[8] = 0x00;
+                rumble_packet[9] = 0x00;
+                rumble_packet[10] = 0x00;
+                rumble_packet[11] = 0x00;
+                len = 12;
+
+                // https://github.com/quantus/xbox-one-controller-protocol
+            case XTYPE_XBOXONE:
+                rumble_packet[0] = 0x09; /* activate rumble */
+                rumble_packet[1] = 0x00;
+                rumble_packet[2] = device->odata_serial++;
+                rumble_packet[3] = 0x09;
+                rumble_packet[4] = 0x00;
+                rumble_packet[5] = 0x0F;
+                rumble_packet[6] = 0x00;                   /* left trigger */
+                rumble_packet[7] = 0x00;                   /* right trigger */
+                rumble_packet[8] = pParam->largeMotor / 2; /* left actuator */
+                rumble_packet[9] = pParam->smallMotor / 2; /* right actuator */
+                rumble_packet[10] = 0x30;                  /* on period */
+                rumble_packet[11] = 0x00;                  /* off period */
+                rumble_packet[12] = 0x01;                  /* repeat count */
+                len = 13;
+
+            default:
+                break;
         }
     }
 
-    if (device->rumble_state == XBOX_ONE_RUMBLE_STATE_BUSY) {
-        const int RUMBLE_BUSY_TIME = 3000000;
-        if (sceKernelGetProcessTime() >= (device->rumble_time + RUMBLE_BUSY_TIME)) {
-            device->rumble_time = 0;
-            device->rumble_state = XBOX_ONE_RUMBLE_STATE_IDLE;
-        }
-    }
-
-    if (device->rumble_state != XBOX_ONE_RUMBLE_STATE_IDLE) {
-        return 0;
-    }
-
-    switch (device->xtype) {
-        case XTYPE_XBOX360:
-            rumble_packet[0] = 0x00;
-            rumble_packet[1] = 0x08;
-            rumble_packet[2] = 0x00;
-            rumble_packet[3] = pParam->largeMotor; /* left actuator? */
-            rumble_packet[4] = pParam->smallMotor; /* right actuator? */
-            rumble_packet[5] = 0x00;
-            rumble_packet[6] = 0x00;
-            rumble_packet[7] = 0x00;
-            len = 8;
-
-            break;
-
-        case XTYPE_XBOX360W:
-            rumble_packet[0] = 0x00;
-            rumble_packet[1] = 0x01;
-            rumble_packet[2] = 0x0F;
-            rumble_packet[3] = 0xC0;
-            rumble_packet[4] = 0x00;
-            rumble_packet[5] = pParam->largeMotor;
-            rumble_packet[6] = pParam->smallMotor;
-            rumble_packet[7] = 0x00;
-            rumble_packet[8] = 0x00;
-            rumble_packet[9] = 0x00;
-            rumble_packet[10] = 0x00;
-            rumble_packet[11] = 0x00;
-            len = 12;
-
-            // https://github.com/quantus/xbox-one-controller-protocol
-        case XTYPE_XBOXONE:
-            rumble_packet[0] = 0x09; /* activate rumble */
-            rumble_packet[1] = 0x00;
-            rumble_packet[2] = device->odata_serial++;
-            rumble_packet[3] = 0x09;
-            rumble_packet[4] = 0x00;
-            rumble_packet[5] = 0x0F;
-            rumble_packet[6] = 0x00;                     /* left trigger */
-            rumble_packet[7] = 0x00;                     /* right trigger */
-            rumble_packet[8] = pParam->largeMotor / 2.6; /* left actuator */
-            rumble_packet[9] = pParam->smallMotor / 2.6; /* right actuator */
-            rumble_packet[10] = 0x30;                    /* on period */
-            rumble_packet[11] = 0x00;                    /* off period */
-            rumble_packet[12] = 0x01;                    /* repeat count */
-            len = 13;
-
-        default:
-            break;
-    }
-
-    device->rumble_time = sceKernelGetProcessTime();
-
-    printf("send rumble :%ld largeMotor:%d smallMotor:%d\n", device->rumble_time, pParam->largeMotor,
-           pParam->smallMotor);
     usb_hid_write(device, rumble_packet, len);
-
-    device->rumble_state = XBOX_ONE_RUMBLE_STATE_QUEUED;
 
     return 0;
 }

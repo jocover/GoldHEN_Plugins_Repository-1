@@ -248,7 +248,7 @@ struct hid_device {
     pthread_t thread;
     pthread_mutex_t mutex; /* Protects input_reports */
     pthread_cond_t condition;
-    pthread_barrier_t barrier;
+    // pthread_barrier_t barrier;
     int shutdown_thread;
     int transfer_loop_finished;
     struct libusb_transfer* transfer;
@@ -261,7 +261,6 @@ struct hid_device {
     int is_driver_detached;
     uint8_t* last_state;
     uint8_t* state_buf;
-    int rumble_state;
     int64_t rumble_time;
 
     uint8_t odata_serial;
@@ -523,6 +522,43 @@ static struct xpad_device xpad_device_list[] = {
     {0x3767, 0x0101, "Fanatec Speedster 3 Forceshock Wheel", 0, XTYPE_XBOX},
     {0xffff, 0xffff, "Chinese-made Xbox Controller", 0, XTYPE_XBOX},
     {0x0000, 0x0000, "Generic X-Box pad", 0, XTYPE_UNKNOWN}};
+
+#define XBOXONE_INIT_PKT(_vid, _pid, _data) \
+    { .idVendor = (_vid), .idProduct = (_pid), .data = (_data), .len = ARRAY_SIZE(_data), }
+
+struct xboxone_init_packet {
+    uint16_t idVendor;
+    uint16_t idProduct;
+    const u8* data;
+    uint8_t len;
+};
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define BIT(nr) (1UL << (nr))
+#define GIP_CMD_ACK 0x01
+#define GIP_CMD_IDENTIFY 0x04
+#define GIP_CMD_POWER 0x05
+#define GIP_CMD_AUTHENTICATE 0x06
+#define GIP_CMD_VIRTUAL_KEY 0x07
+#define GIP_CMD_RUMBLE 0x09
+#define GIP_CMD_LED 0x0a
+#define GIP_CMD_FIRMWARE 0x0c
+#define GIP_CMD_INPUT 0x20
+
+#define GIP_SEQ0 0x00
+
+#define GIP_OPT_ACK 0x10
+#define GIP_OPT_INTERNAL 0x20
+
+#define GIP_PWR_ON 0x00
+#define GIP_LED_ON 0x01
+
+#define GIP_PL_LEN(N) (N)
+#define GIP_MOTOR_R BIT(0)
+#define GIP_MOTOR_L BIT(1)
+#define GIP_MOTOR_RT BIT(2)
+#define GIP_MOTOR_LT BIT(3)
+#define GIP_MOTOR_ALL (GIP_MOTOR_R | GIP_MOTOR_L | GIP_MOTOR_RT | GIP_MOTOR_LT)
 
 int usb_hid_init(struct hid_device* device);
 int usb_hid_get_report(struct hid_device* device, ScePadData* pData);
